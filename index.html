@@ -42,6 +42,7 @@ h3{font-size:1rem}
 .brand{font-family:var(--display);font-size:1.05rem;font-weight:700;color:var(--muted)}
 .monthnav{display:flex;align-items:center;gap:6px}
 .monthnav h1{font-size:1.6rem;min-width:9.5ch;text-align:center}
+.prange{font-size:.72rem;font-weight:600;color:var(--muted);margin-left:6px;white-space:nowrap}
 .lock{font-size:.75rem;font-weight:600;color:var(--muted);background:var(--sunk);border-radius:999px;padding:2px 8px}
 .iconbtn{border:1px solid var(--line);background:var(--surface);width:36px;height:36px;border-radius:50%;cursor:pointer;font-size:1.1rem;line-height:1;display:grid;place-items:center}
 .iconbtn:hover{border-color:var(--accent);color:var(--accent)}
@@ -379,6 +380,37 @@ const fmtDate = d => d ? `${d.slice(8,10)}.${d.slice(5,7)}.${d.slice(0,4)}` : ''
 const fmtDay = d => d ? `${d.slice(8,10)}.${d.slice(5,7)}.` : '';
 function daysBetween(a,b){ const da=new Date(a+'T00:00:00'), db=new Date(b+'T00:00:00'); return Math.round((db-da)/86400000); }
 function dueDate(key, day){ return `${key}-${pad(Math.min(Math.max(1,day||1), daysIn(key)))}`; }
+/* ---------- Gehaltsmonat ----------
+   S.monthStart = 'payday': Ab dem Monat S.periodSince läuft ein Monat vom Gehaltstag des Vormonats bis zum Tag davor,
+   z. B. „November“ = 26.10.–25.11. Monate davor bleiben Kalendermonate (1. bis Monatsende).
+   Gespeichert wird weiter je Monat („Fach“ YYYY-MM); es ändert sich nur, in welches Fach ein Datum gehört. */
+const payMode = () => S.monthStart === 'payday' && (+S.payday||1) > 1 && /^\d{4}-\d{2}$/.test(S.periodSince||'');
+const cutDay = key => Math.min(Math.max(1, +S.payday || 1), daysIn(key));     // ab diesem Tag beginnt der nächste Gehaltsmonat
+const isPeriod = key => payMode() && key >= S.periodSince;                     // Monat beginnt am Gehaltstag des Vormonats
+function addDays(d, n){ const x = new Date(d+'T00:00:00Z'); x.setUTCDate(x.getUTCDate()+n); return x.toISOString().slice(0,10); }
+function periodStart(key){ if(!isPeriod(key)) return `${key}-01`; const p = shiftMonth(key,-1); return `${p}-${pad(cutDay(p))}`; }
+function periodEnd(key){ return isPeriod(shiftMonth(key,1)) ? addDays(`${key}-${pad(cutDay(key))}`, -1) : `${key}-${pad(daysIn(key))}`; }
+const periodDays = key => daysBetween(periodStart(key), periodEnd(key)) + 1;
+const inPeriod = (key, d) => !!d && d >= periodStart(key) && d <= periodEnd(key);
+/** In welchen Monat (welches Fach) gehört ein Datum? */
+function bucketOf(date){
+  const d = String(date || todayStr()), k = d.slice(0,7);
+  if(!payMode()) return k;
+  const n = shiftMonth(k,1);
+  return isPeriod(n) && +d.slice(8,10) >= cutDay(k) ? n : k;
+}
+const nowKey = () => bucketOf(todayStr());
+/** Fälligkeitsdatum eines Postens mit Tag „day“ in Monat key (Gehaltsmonat: Tage ab dem Gehaltstag liegen im Vormonat) */
+function itemDate(key, day){
+  day = Math.max(1, +day || 1);
+  if(!isPeriod(key)) return dueDate(key, day);
+  const p = shiftMonth(key,-1);
+  if(day >= cutDay(p)) return `${p}-${pad(Math.min(day, daysIn(p)))}`;
+  const d = `${key}-${pad(Math.min(day, daysIn(key)))}`, e = periodEnd(key);
+  return d > e ? e : d;
+}
+/** Zeitraum zum Anzeigen, nur wenn er vom Kalendermonat abweicht */
+function periodRange(key){ const a = periodStart(key), b = periodEnd(key); return (a.slice(8)==='01' && b === `${key}-${pad(daysIn(key))}`) ? '' : `${fmtDay(a)}–${fmtDay(b)}`; }
 function relDay(d){ const n = daysBetween(todayStr(), d); return n===0?'Heute': n===1?'Morgen': n===-1?'Gestern': n<0?`vor ${-n} Tagen`:`in ${n} Tagen`; }
 
 /* ---------------- Standardwerte ---------------- */
@@ -422,6 +454,8 @@ function normalizeS(s){
   if(typeof s.payday!=='number') s.payday = 26;
   if(!/^\d{4}-\d{2}$/.test(s.budgetStart||'')) s.budgetStart = monthKey(new Date());
   if(!s.horizon) s.horizon = 'month';
+  if(s.monthStart !== 'payday') s.monthStart = 'calendar';
+  if(typeof s.periodSince !== 'string') s.periodSince = '';
   s.incomes.forEach(i=>{ i.amount=i.amount||0; if(!i.day) i.day=s.payday; if(!i.account) i.account=s.accounts[0].id; if(i.active===undefined) i.active=true; });
   s.recurring.forEach(r=>{ r.amount=r.amount||0; r.kind=r.kind||'fix'; r.interval=+r.interval||1; r.dueDay=+r.dueDay||1; r.start=r.start||''; r.end=r.end||''; if(r.active===undefined) r.active=true; r.account=r.account||s.accounts[0].id; r.personId=r.personId||''; });
   s.cats.forEach(c=>{ if(!Array.isArray(c.subs)) c.subs=[]; c.limit=+c.limit||0; c.weekly=+c.weekly||0; c.subLimits=c.subLimits||{}; c.subWeekly=c.subWeekly||{}; });
@@ -544,8 +578,8 @@ function planItems(key){
   return S.recurring.filter(r=>occurs(r,key) || txIds.has(m.plan?.[r.id]?.paidTx)).map(r=>{
     const p = m.plan?.[r.id]||{};
     const tx = p.paidTx ? (m.tx||[]).find(t=>t.id===p.paidTx) : null;
-    return {r, amount: p.amount ?? r.amount ?? 0, due: dueDate(key, r.dueDay), paid: !!tx, tx, skip: !!p.skip && !tx};
-  }).sort((a,b)=>a.due.localeCompare(b.due));
+    return {r, amount: p.amount ?? r.amount ?? 0, due: itemDate(key, r.dueDay), paid: !!tx, tx, skip: !!p.skip && !tx};
+  }).filter(x=>x.paid || inPeriod(key, x.due)).sort((a,b)=>a.due.localeCompare(b.due));
 }
 function incomeItems(key){
   const m = months[key]||{};
@@ -553,8 +587,8 @@ function incomeItems(key){
   return S.incomes.filter(i=>(i.active!==false && managed(key)) || txIds.has(m.incomePlan?.[i.id]?.tx)).map(i=>{
     const p = m.incomePlan?.[i.id]||{};
     const tx = p.tx ? (m.tx||[]).find(t=>t.id===p.tx) : null;
-    return {i, amount: p.amount ?? i.amount ?? 0, due: dueDate(key, i.day||S.payday), received: !!tx, tx, skip: !!p.skip && !tx};
-  });
+    return {i, amount: p.amount ?? i.amount ?? 0, due: itemDate(key, i.day||S.payday), received: !!tx, tx, skip: !!p.skip && !tx};
+  }).filter(x=>x.received || inPeriod(key, x.due));
 }
 /* Für Sparziele reserviertes Geld: bleibt auf dem Konto (Sparziel = Planung, keine Überweisung),
    darf aber nicht als frei verfügbar gelten – egal ob schon als „zurückgelegt“ markiert oder noch offen. */
@@ -683,13 +717,14 @@ function statusChip(s){
 }
 
 /* Wochen (Montag bis Sonntag, innerhalb des Monats) */
+/* Wochen (Montag bis Sonntag) innerhalb des Monats bzw. Gehaltsmonats – als echte Datumsangaben */
 function weeksOf(key){
-  const [y,m] = key.split('-').map(Number); const weeks=[]; let w=null;
-  for(let d=1; d<=daysIn(key); d++){ const wd = new Date(y,m-1,d).getDay(); if(d===1 || wd===1){ w={from:d,to:d}; weeks.push(w); } else w.to=d; }
+  const weeks=[]; let w=null; const end = periodEnd(key);
+  for(let d = periodStart(key); d <= end; d = addDays(d,1)){ const wd = new Date(d+'T00:00:00Z').getUTCDay(); if(!w || wd===1){ w={from:d,to:d}; weeks.push(w); } else w.to=d; }
   return weeks;
 }
 function weekSpent(key, w, catId, sub){
-  return sum(txsOf(key).filter(t=>{ if(t.type!=='expense'||t.rid||t.cat!==catId) return false; if(sub!==undefined && t.sub!==sub) return false; const d=+(t.date||'').slice(8,10); return d>=w.from && d<=w.to; }), t=>t.amount);
+  return sum(txsOf(key).filter(t=>{ if(t.type!=='expense'||t.rid||t.cat!==catId) return false; if(sub!==undefined && t.sub!==sub) return false; return (t.date||'') >= w.from && (t.date||'') <= w.to; }), t=>t.amount);
 }
 function weeklyBudgets(){
   const out=[];
@@ -713,6 +748,25 @@ function budgetReserve(key){
   });
   return r2(res);
 }
+/* Bestätigung vor dem Umstellen – zeigt genau, was passiert */
+let msPending = null;
+function msConfirm(){
+  const P = +S.payday||26;
+  if(msPending==='payday'){
+    const t = todayStr(), k = t.slice(0,7); let since = +t.slice(8,10) >= Math.min(P, daysIn(k)) ? shiftMonth(k,1) : k;
+    if(isClosed(shiftMonth(since,-1))) since = shiftMonth(since,1);
+    const prev = shiftMonth(since,-1), from = `${prev}-${pad(Math.min(P, daysIn(prev)))}`;
+    const n = allTx().filter(x=>x._m===prev && x.date >= from && !isClosed(prev)).length;
+    if(P < 2) return `<div class="warnrow"><i>⚠</i><div>Dein Gehaltstag ist der 1. – das ist schon der Kalendermonat. Trage oben einen anderen Gehaltstag ein.</div></div>`;
+    return `<div class="warnrow info" id="ms-confirm"><i>ℹ</i><div><b>Auf Gehaltsmonat umstellen?</b><br>
+      Ab ${esc(monthName(since))} läuft jeder Monat vom ${P}. bis zum ${P-1}. des Folgemonats – z. B. ${esc(monthOnly(since))} = ${fmtDay(from)}–${fmtDay(addDays(`${since}-${pad(Math.min(P, daysIn(since)))}`,-1))}.
+      ${esc(monthOnly(prev))} endet dafür am ${fmtDay(addDays(from,-1))}. ${n ? `${n} Buchung${n===1?'':'en'} vom ${fmtDay(from)} an wandern in den ${esc(monthOnly(since))}.` : ''}
+      Frühere Monate bleiben, wie sie sind. Vorher wird automatisch eine Sicherung angelegt; du kannst jederzeit zurückstellen.
+      <div class="btnrow" style="margin-top:8px"><button class="btn primary" data-act="msYes">Umstellen</button><button class="btn" data-act="msNo">Abbrechen</button></div></div></div>`;
+  }
+  return `<div class="warnrow info" id="ms-confirm"><i>ℹ</i><div><b>Zurück auf Kalendermonat (1. bis Monatsende)?</b><br>Buchungen werden wieder nach Kalendermonat zugeordnet. Vorher wird automatisch eine Sicherung angelegt.
+    <div class="btnrow" style="margin-top:8px"><button class="btn primary" data-act="msYes">Umstellen</button><button class="btn" data-act="msNo">Abbrechen</button></div></div></div>`;
+}
 function daysToPayday(){
   const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const P = S.payday||26; const dThis = Math.min(P, daysIn(monthKey(today)));
@@ -724,9 +778,14 @@ function daysToPayday(){
 
 /* „Wie viel kann ich heute ausgeben?“ – nachvollziehbare Rechnung */
 function spendToday(){
-  const key = monthKey(new Date());
+  const key = nowKey();
   const bal = balances(key);
-  const plan = planItems(key).filter(p=>!p.skip && !p.paid);            // nur noch NICHT bezahlte Zahlungen
+  let plan = planItems(key).filter(p=>!p.skip && !p.paid);            // nur noch NICHT bezahlte Zahlungen
+  // Kalendermonat + „bis Gehaltstag“: Zahlungen des nächsten Monats, die VOR dem nächsten Gehalt fällig sind (z. B. Miete am 1.), auch abziehen
+  if(!payMode() && S.horizon==='payday'){
+    const nextPay = addDays(todayStr(), daysToPayday()), nk = shiftMonth(key,1);
+    if(nextPay.slice(0,7) === nk) plan = plan.concat(planItems(nk).filter(p=>!p.skip && !p.paid && p.due < nextPay));
+  }
   const openFixed = sum(plan.filter(p=>p.r.kind!=='schulden'), p=>p.amount);
   const openDebt = sum(plan.filter(p=>p.r.kind==='schulden'), p=>p.amount);
   const sres = savingsReserve(key);
@@ -735,7 +794,7 @@ function spendToday(){
   const expected = sum(incomeItems(key).filter(i=>!i.skip && !i.received), i=>i.amount);
   const free = r2(bal.total - openFixed - openDebt - openGoals - reserve);
   const d = new Date();
-  const days = S.horizon==='payday' ? daysToPayday() : daysIn(key) - d.getDate() + 1;
+  const days = payMode() ? Math.max(1, daysBetween(todayStr(), periodEnd(key)) + 1) : S.horizon==='payday' ? daysToPayday() : daysIn(key) - d.getDate() + 1;
   const lines = [
     ['Kontostand aktuell (Girokonto + Bargeld, alle echten Buchungen)', bal.total],
     ['− noch offene feste Zahlungen (noch nicht bezahlt)', -openFixed],
@@ -749,7 +808,7 @@ function spendToday(){
 /* Warnungen – nur Hinweise, ändern keine Daten */
 function warnings(key){
   const w = [];
-  const isNow = key===monthKey(new Date());
+  const isNow = key===nowKey();
   const bal = balances(key);
   const hasTx = txsOf(key).length>0;
   if(!managed(key)) return w;
@@ -759,7 +818,7 @@ function warnings(key){
     else if(b.pct>=.8) w.push(['warn', `Budget „${b.label}“ zu ${Math.round(b.pct*100)} % verbraucht (noch ${fmt(b.left)}).`]);
   });
   if(isNow){
-    const today = +todayStr().slice(8,10);
+    const today = todayStr();
     const wk = weeksOf(key).find(x=>today>=x.from && today<=x.to);
     weeklyBudgets().forEach(b=>{ const s=weekSpent(key,wk,b.catId,b.sub); if(s>b.limit) w.push(['warn', `Wochenbudget „${b.label}“ überschritten: ${fmt(s)} von ${fmt(b.limit)}.`]); });
     upcoming(10).forEach(u=>{
@@ -771,13 +830,13 @@ function warnings(key){
     if(bal.anyOpening && bal.total - st.openFixed - st.openDebt < 0) w.push(['bad', `Der Kontostand (${fmt(bal.total)}) reicht möglicherweise nicht für alle offenen Zahlungen (${fmt(st.openFixed+st.openDebt)}).`]);
   }
   planItems(key).filter(p=>!p.skip && !p.paid && p.r.kind==='schulden' && p.amount>0).forEach(p=>w.push(['warn', `Schuldenzahlung „${p.r.name}“ (${fmt(p.amount)}) ist diesen Monat noch offen.`, 'wiederkehrend']));
-  bal.rows.forEach(r=>{ if(r.actual!=null && key < monthKey(new Date()) && !actualAtEnd(key, r.actualAt)) w.push(['info', `${r.a.name}: Der tatsächliche Kontostand ist vom ${fmtDate(r.actualAt)}, nicht vom letzten Tag des Monats (${fmtDate(monthLastDay(key))}).`, 'konten']); });
+  bal.rows.forEach(r=>{ if(r.actual!=null && key < nowKey() && !actualAtEnd(key, r.actualAt)) w.push(['info', `${r.a.name}: Der tatsächliche Kontostand ist vom ${fmtDate(r.actualAt)}, nicht vom letzten Tag des Monats (${fmtDate(monthLastDay(key))}).`, 'konten']); });
   bal.rows.forEach(r=>{ if(r.actual!=null && Math.abs(r.diff)>=0.01) w.push(['warn', `${r.a.name}: Tatsächlicher Kontostand weicht um ${fmtS(r.diff)} vom berechneten ab. Fehlt eine Buchung?`, 'konten']); });
   return w;
 }
 /* Nächste Zahlungen (aktueller + nächster Monat) */
 function upcoming(limitDays=31){
-  const k1 = monthKey(new Date()), k2 = shiftMonth(k1,1), t = todayStr();
+  const k1 = nowKey(), k2 = shiftMonth(k1,1), t = todayStr();
   const out = [];
   [k1,k2].forEach(k=>planItems(k).forEach(p=>{ if(p.paid||p.skip||!(p.amount>0)) return; const n=daysBetween(t,p.due); if(n<=limitDays) out.push({name:p.r.name, amount:p.amount, due:p.due, kind:p.r.kind, key:k, rid:p.r.id}); }));
   return out.sort((a,b)=>a.due.localeCompare(b.due));
@@ -825,7 +884,7 @@ function editSettings(fn, save=true){ invalidate(); fn(S); if(save) persistSetti
 function findTx(id){ for(const k in months){ const t = txsOf(k).find(x=>x.id===id); if(t) return {key:k, t}; } return null; }
 function addTx(t){
   t.id = t.id || newId('t'); t.t = t.t || Date.now();
-  const key = (t.date||todayStr()).slice(0,7);
+  const key = bucketOf(t.date||todayStr());
   return editMonth(key, m=>m.tx.push(t)) ? t : null;
 }
 function removeTx(id){
@@ -834,7 +893,7 @@ function removeTx(id){
 }
 function updateTx(id, nt){
   const f = findTx(id); if(!f) return false;
-  const newKey = nt.date.slice(0,7);
+  const newKey = nt.date === f.t.date ? f.key : bucketOf(nt.date);   // Datum unverändert → bleibt im bisherigen Monat
   if(isClosed(f.key)){ lockedMsg(f.key); return false; }
   if(newKey===f.key) return editMonth(f.key, m=>{
     const i=m.tx.findIndex(x=>x.id===id); if(i>=0) m.tx[i]=nt;
@@ -861,6 +920,66 @@ function updateTx(id, nt){
   return true;
 }
 
+/* ---------- Monatsgrenze ändern (Gehaltsmonat an/aus, anderer Gehaltstag) ----------
+   1) Vorher merken, zu welchem fälligen Posten (Datum!) eine verknüpfte Buchung gehört.
+   2) Einstellung ändern.
+   3) Jede Buchung ins passende Fach legen: unverknüpfte nach ihrem Datum, verknüpfte nach dem Datum ihres Postens
+      (z. B. Gehalt vom 26.10. → November; eine am 28.10. bezahlte Oktober-Miete bleibt im Oktober).
+   Abgeschlossene Monate werden nie verändert. Vorher wird automatisch gesichert. */
+function linkedDues(){
+  const out = {};
+  for(const k of Object.keys(months)){
+    const m = months[k]; const ids = new Set((m.tx||[]).map(t=>t.id));
+    for(const [rid,p] of Object.entries(m.plan||{})){ const r = S.recurring.find(x=>x.id===rid); if(p && p.paidTx && ids.has(p.paidTx)) out[p.paidTx] = {kind:'plan', id:rid, due: itemDate(k, r ? r.dueDay : 1), amount:p.amount}; }
+    for(const [iid,p] of Object.entries(m.incomePlan||{})){ const i = S.incomes.find(x=>x.id===iid); if(p && p.tx && ids.has(p.tx)) out[p.tx] = {kind:'income', id:iid, due: itemDate(k, i ? (i.day||S.payday) : S.payday), amount:p.amount}; }
+  }
+  return out;
+}
+function changeMonthRule(fn, reason){
+  autoBackup(reason || 'vor Änderung der Monatsgrenze');
+  const dues = linkedDues();
+  editSettings(fn);
+  invalidate();
+  const moves = [];
+  for(const k of Object.keys(months).sort()){
+    if(isClosed(k)) continue;
+    for(const t of txsOf(k)){
+      const link = dues[t.id];
+      const nk = bucketOf(link ? link.due : t.date);
+      if(nk !== k && !isClosed(nk)) moves.push({t, from:k, to:nk, link});
+    }
+  }
+  const touched = new Set();
+  for(const mv of moves){
+    const {t, from, to, link} = mv;
+    const fm = months[from];
+    fm.tx = fm.tx.filter(x=>x.id!==t.id);
+    if(link && link.kind==='plan' && fm.plan?.[link.id]?.paidTx===t.id) delete fm.plan[link.id].paidTx;
+    if(link && link.kind==='income' && fm.incomePlan?.[link.id]?.tx===t.id) delete fm.incomePlan[link.id].tx;
+    const tm = months[to] = materialize(to);
+    tm.tx.push(t);
+    if(link){
+      const field = link.kind==='plan' ? 'plan' : 'incomePlan', ref = link.kind==='plan' ? 'paidTx' : 'tx';
+      const cur0 = tm[field][link.id];
+      const taken = cur0 && cur0[ref] && tm.tx.some(x=>x.id===cur0[ref]);
+      if(!taken) tm[field][link.id] = {...(cur0||{}), amount: link.amount ?? cur0?.amount ?? t.amount, [ref]: t.id, skip:false};
+    }
+    touched.add(from); touched.add(to);
+  }
+  invalidate();
+  touched.forEach(k=>persistMonth(k));
+  persistSettings();
+  return moves.length;
+}
+function startPayMonths(){
+  const P = Math.min(Math.max(2, +S.payday||26), 31);
+  const t = todayStr(), k = t.slice(0,7);
+  let since = +t.slice(8,10) >= Math.min(P, daysIn(k)) ? shiftMonth(k,1) : k;   // der Gehaltsmonat, in dem du gerade bist
+  if(isClosed(shiftMonth(since,-1))) since = shiftMonth(since,1);               // abgeschlossene Monate bleiben unverändert
+  return changeMonthRule(s=>{ s.monthStart='payday'; s.periodSince=since; }, 'vor Umstellung auf Gehaltsmonat');
+}
+function stopPayMonths(){ return changeMonthRule(s=>{ s.monthStart='calendar'; s.periodSince=''; }, 'vor Umstellung auf Kalendermonat'); }
+
 /* Automatische Sicherungen (einmal pro Tag, die letzten 7) */
 function autoBackup(reason){
   try{
@@ -882,8 +1001,9 @@ function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg
 const main = document.getElementById('main');
 function renderHead(){
   invalidate();
-  document.getElementById('mlabel').innerHTML = esc(monthName(cur)) + (isClosed(cur)?' <span class="lock">abgeschlossen</span>':'');
-  document.getElementById('today').hidden = cur===monthKey(new Date());
+  const rng = periodRange(cur);
+  document.getElementById('mlabel').innerHTML = esc(monthName(cur)) + (rng?` <small class="prange">${esc(rng)}</small>`:'') + (isClosed(cur)?' <span class="lock">abgeschlossen</span>':'');
+  document.getElementById('today').hidden = cur===nowKey();
   const c = calcM(cur), b = balances(cur);
   document.getElementById('kpis').innerHTML = `
     <div class="kpi"><span>Startguthaben</span><b class="num">${fmt(c.opening)}</b><small>${!b.anyOpening?'nicht gesetzt':b.rows.every(r=>r.openingSrc==='auto')?`aus ${esc(monthOnly(shiftMonth(cur,-1)))}`:b.rows.some(r=>r.openingSrc==='auto')?`teils aus ${esc(monthOnly(shiftMonth(cur,-1)))}`:'eingetragen'}</small></div>
@@ -923,7 +1043,7 @@ const catOpts = (sel, withNew, withAll) => (withAll?opt('','Alle Kategorien',sel
 /* ---------- Übersicht ---------- */
 VIEWS.uebersicht = function(){
   const c = calcM(cur);
-  const isNow = cur===monthKey(new Date());
+  const isNow = cur===nowKey();
   const prevKey = shiftMonth(cur,-1);
   const hasPrev = !!months[prevKey];
   const p = hasPrev ? calcM(prevKey) : null;
@@ -939,7 +1059,7 @@ VIEWS.uebersicht = function(){
       ${st.openingMissing?'<div class="hint">⚠ Startguthaben fehlt – trag es unter „Konten“ ein, sonst stimmt die Zahl nicht.</div>':''}
       <div class="calcrows">
         ${st.lines.map(([l,v])=>`<div class="calcrow"><span>${esc(l)}</span><span class="num">${fmt(v)}</span></div>`).join('')}
-        <div class="calcrow total"><span>= heute frei ausgebbar (bis ${S.horizon==='payday'?`Gehalt am ${S.payday}.`:'Monatsende'})</span><span class="num">${fmt(st.free)}</span></div>
+        <div class="calcrow total"><span>= heute frei ausgebbar (bis ${payMode()?`${fmtDay(periodEnd(nowKey()))}, nächstes Gehalt am ${fmtDay(addDays(periodEnd(nowKey()),1))}`:S.horizon==='payday'?`Gehalt am ${S.payday}.`:'Monatsende'})</span><span class="num">${fmt(st.free)}</span></div>
         <div class="calcrow"><span>÷ verbleibende Tage (inkl. heute)</span><span class="num">${st.days}</span></div>
         <div class="calcrow total"><span>= pro Tag</span><span class="num">${fmt(st.perDay)}</span></div>
       </div>
@@ -998,10 +1118,10 @@ VIEWS.uebersicht = function(){
   const wb = weeklyBudgets();
   let weekHtml = '';
   if(wb.length){
-    const weeks = weeksOf(cur); const td = isNow ? +todayStr().slice(8,10) : 0;
+    const weeks = weeksOf(cur); const td = isNow ? todayStr() : '';
     weekHtml = `<section><div class="sechead"><h2>Wochenbudgets</h2></div>${wb.map(b=>`<div class="panel tbl-wrap"><h3 style="padding-top:8px">${esc(b.label)} · ${fmt(b.limit)} pro Woche</h3>
       <table><thead><tr><th class="l">Woche</th><th class="l">Zeitraum</th><th>Ausgegeben</th><th>Übrig</th></tr></thead><tbody>
-      ${weeks.map((wk,i)=>{ const s=weekSpent(cur,wk,b.catId,b.sub), l=r2(b.limit-s); return `<tr class="${td>=wk.from&&td<=wk.to?'cur':''}"><td class="l">Woche ${i+1}</td><td class="l">${pad(wk.from)}.–${pad(wk.to)}.</td><td>${fmt(s)}</td><td class="${l<0?'neg':'pos'}">${fmt(l)}</td></tr>`; }).join('')}
+      ${weeks.map((wk,i)=>{ const s=weekSpent(cur,wk,b.catId,b.sub), l=r2(b.limit-s); return `<tr class="${td>=wk.from&&td<=wk.to?'cur':''}"><td class="l">Woche ${i+1}</td><td class="l">${fmtDay(wk.from)}–${fmtDay(wk.to)}</td><td>${fmt(s)}</td><td class="${l<0?'neg':'pos'}">${fmt(l)}</td></tr>`; }).join('')}
       </tbody></table></div>`).join('')}<p class="hint">Wochenbudgets werden zusätzlich zum Monatsbudget angezeigt und ersetzen es nicht.</p></section>`;
   }
 
@@ -1085,7 +1205,7 @@ function linkPlan(key, rid, txId){
   editMonth(key, m=>{ m.plan[rid] = {...(m.plan[rid]||{}), amount: it.amount, paidTx: txId, skip:false}; });
 }
 /* Tatsächlicher Bankstand: Datum prüfen + als Startguthaben des Folgemonats übernehmen (nie als Einnahme) */
-const monthLastDay = key => `${key}-${pad(daysIn(key))}`;
+const monthLastDay = key => periodEnd(key);
 const actualAtEnd = (key, at) => at === monthLastDay(key);
 function actualBox(key, r){
   const next = shiftMonth(key,1), nb = balances(next).rows.find(x=>x.a.id===r.a.id);
@@ -1107,11 +1227,11 @@ function syncForm(prefix){
   if(want && ![...ss.options].some(o=>o.value===want)){ ss.insertAdjacentHTML('afterbegin', opt(want, want+' (gelöscht)', want)); }
   document.getElementById(prefix+'-newsub').hidden = ss.value!=='__new';
   const rw = document.getElementById(prefix+'-ridwrap');
-  if(rw){ const rs = document.getElementById(prefix+'-rid'); const key = (document.getElementById(prefix+'-date')?.value||cur+'-01').slice(0,7);
+  if(rw){ const rs = document.getElementById(prefix+'-rid'); const key = bucketOf(document.getElementById(prefix+'-date')?.value||periodStart(cur));
     const o = openPlanOpts(key, 'fix', '', rs.value); rs.innerHTML = o.html; rw.hidden = !o.count; if(!o.count) rs.value=''; }
   const li = document.getElementById(prefix+'-limit');
   if(!li) return;
-  const key = (document.getElementById(prefix+'-date')?.value||cur+'-01').slice(0,7);
+  const key = bucketOf(document.getElementById(prefix+'-date')?.value||periodStart(cur));
   const parts = [];
   if(k && k.limit){ const used = catSpent(key,k.id), rest = r2(k.limit-used); parts.push(`${esc(k.name)}: ${fmt(used)} von ${fmt(k.limit)} · ${rest>=0?`noch <b>${fmt(rest)}</b> frei`:`<b style="color:var(--bad)">${fmt(-rest)} über dem Budget</b>`}`); }
   if(k && ss.value && k.subLimits?.[ss.value]){ const lim=k.subLimits[ss.value], used=catSpent(key,k.id,ss.value), rest=r2(lim-used); parts.push(`${esc(ss.value)}: Budget ${fmt(lim)} · bisher ${fmt(used)} · ${rest>=0?`noch <b>${fmt(rest)}</b>`:`<b style="color:var(--bad)">${fmt(-rest)} drüber</b>`}`); }
@@ -1251,7 +1371,7 @@ VIEWS.einnahmen = function(){
   <section><div class="sechead"><h2>Weitere Einnahme eintragen</h2></div>
     <form class="addform" id="incform" autocomplete="off">
       <div class="field s2 half"><label for="i-amt">Betrag (€)</label><input id="i-amt" class="amt" type="text" inputmode="decimal" placeholder="0,00"></div>
-      <div class="field s2 half"><label for="i-date">Datum</label><input id="i-date" type="date" value="${key===monthKey(new Date())?todayStr():key+'-01'}"></div>
+      <div class="field s2 half"><label for="i-date">Datum</label><input id="i-date" type="date" value="${key===nowKey()?todayStr():periodStart(key)}"></div>
       <div class="field s2"><label for="i-acc">Auf Konto</label><select id="i-acc">${accOpts(S.accounts[0].id)}</select></div>
       <div class="field s3"><label for="i-src">Quelle</label><select id="i-src">${opt('','Einmalig / Sonstiges','')}${S.incomes.map(i=>opt(i.id,i.name,'')).join('')}</select></div>
       <div class="field s3"><label for="i-note">Beschreibung</label><input id="i-note" type="text" placeholder="z. B. Rückerstattung"></div>
@@ -1301,7 +1421,7 @@ VIEWS.konten = function(){
   <section><div class="sechead"><h2>Umbuchung</h2></div><p class="hint">Zum Beispiel Bargeld abheben: von Girokonto nach Bargeld. Zählt nicht als Ausgabe.</p>
     <form class="addform" id="trform" autocomplete="off">
       <div class="field s2 half"><label for="t-amt">Betrag (€)</label><input id="t-amt" class="amt" type="text" inputmode="decimal" placeholder="0,00"></div>
-      <div class="field s2 half"><label for="t-date">Datum</label><input id="t-date" type="date" value="${key===monthKey(new Date())?todayStr():key+'-01'}"></div>
+      <div class="field s2 half"><label for="t-date">Datum</label><input id="t-date" type="date" value="${key===nowKey()?todayStr():periodStart(key)}"></div>
       <div class="field s2 half"><label for="t-from">Von</label><select id="t-from">${accOpts(S.accounts[0].id)}</select></div>
       <div class="field s2 half"><label for="t-to">Nach</label><select id="t-to">${accOpts((S.accounts[1]||S.accounts[0]).id)}</select></div>
       <div class="field s4"><label for="t-note">Notiz</label><input id="t-note" type="text" placeholder="z. B. Geldautomat"></div>
@@ -1361,7 +1481,7 @@ function viewPerson(pid){
   const shown = pm ? txs.filter(t=>t.date.slice(0,7)===pm) : txs;
   const startBal = r2(sum(before, debtEffect));
   let run = startBal;
-  const ledger = shown.map(t=>{ run = r2(run + debtEffect(t)); const k=t.date.slice(0,7); const locked=isClosed(k);
+  const ledger = shown.map(t=>{ run = r2(run + debtEffect(t)); const k=t._m||bucketOf(t.date); const locked=isClosed(k);
     return `<tr><td class="l">${fmtDate(t.date)}</td><td class="l wrap">${esc(debtDesc(t))}</td><td class="l">${esc(debtTypeLabel(t))}</td><td class="${t.type==='debt_in'?'neg':'pos'}">${fmtS(debtEffect(t))}</td><td>${fmt(run)}</td>
       <td class="l wrap">${esc(linkedInfo(t))}</td>
       <td>${locked?'<span class="chip">abgeschl.</span>':`<button class="act" data-act="edit" data-id="${esc(t.id)}" title="Bearbeiten">✎</button>${delBtn('tx:'+t.id,'Buchung löschen')}`}</td></tr>`; }).join('');
@@ -1429,7 +1549,7 @@ function syncDebtForm(){
   const prevAcc = acc.value;
   aw.hidden = tp.value==='debt_credit';
   const rw = document.getElementById('d-ridwrap'), rs = document.getElementById('d-rid');
-  if(rw){ const key = (document.getElementById('d-date')?.value||todayStr()).slice(0,7); const o = openPlanOpts(key,'schulden',selPerson, rs.value); rs.innerHTML = o.html; rw.hidden = tp.value!=='debt_repay' || !o.count; if(rw.hidden) rs.value=''; }
+  if(rw){ const key = bucketOf(document.getElementById('d-date')?.value||todayStr()); const o = openPlanOpts(key,'schulden',selPerson, rs.value); rs.innerHTML = o.html; rw.hidden = tp.value!=='debt_repay' || !o.count; if(rw.hidden) rs.value=''; }
   cw.hidden = tp.value!=='expense';
   acc.innerHTML = accOpts(prevAcc || S.accounts[0].id, tp.value==='debt_in');
   h.textContent = ({
@@ -1479,7 +1599,7 @@ VIEWS.wiederkehrend = function(){
     const state = p.paid ? `<button class="secondary on" data-act="planUndo" data-id="${esc(p.r.id)}" ${L}>✓ bezahlt ${fmtDay(p.tx.date)}</button>`
       : p.skip ? `<span class="chip">ausgesetzt</span>` : `<button class="secondary" data-act="planPay" data-id="${esc(p.r.id)}" ${L}>Als bezahlt markieren</button>`;
     return `<div class="card"><div class="top2"><b>${esc(p.r.name)} <span class="chip">${esc(KINDS[p.r.kind])}</span>${p.r.kind==='schulden'&&p.r.personId?` <span class="chip acc">${esc(personName(p.r.personId))}</span>`:''}</b>
-      <span class="hint">fällig ${fmtDate(p.due)}${!p.paid&&!p.skip&&key===monthKey(new Date())?` · ${n<0?`<b style="color:var(--bad)">überfällig</b>`:esc(relDay(p.due))}`:''}</span></div>
+      <span class="hint">fällig ${fmtDate(p.due)}${!p.paid&&!p.skip&&key===nowKey()?` · ${n<0?`<b style="color:var(--bad)">überfällig</b>`:esc(relDay(p.due))}`:''}</span></div>
       <div class="row w3"><label class="name" for="pl-${esc(p.r.id)}">Geplant<small>${p.paid?`Bezahlt: ${fmt(p.tx.amount)}${Math.abs(p.tx.amount-p.amount)>=.01?` (Abweichung ${fmtS(p.tx.amount-p.amount)})`:''} · ${esc(accName(p.tx.account))}`:esc(accName(p.r.account))}</small></label>
       <input id="pl-${esc(p.r.id)}" class="amt" type="text" inputmode="decimal" value="${amtIn(p.amount)}" data-bind="M|plan|${esc(p.r.id)}|amount" data-type="amt" aria-label="Geplanter Betrag" ${L}>
       <div class="btnrow">${state}${!p.paid?`<button class="act" data-act="planSkip" data-id="${esc(p.r.id)}" ${L}>${p.skip?'wieder einplanen':'aussetzen'}</button>`:''}</div></div></div>`;
@@ -1680,7 +1800,9 @@ VIEWS.setup = function(){
   <section><div class="sechead"><h2>Gehalt & „Heute ausgeben“</h2></div>
     <div class="panel"><div class="rows">
       <div class="row"><label class="name" for="sf-payday">Gehaltstag<small>Tag im Monat, an dem das Gehalt kommt</small></label><input type="number" id="sf-payday" min="1" max="31" value="${S.payday}" data-bind="S|payday" data-type="day"></div>
-      <div class="row"><label class="name" for="sf-hor">„Heute ausgeben“ rechnen bis<small>Verteilung des freien Geldes auf die Tage</small></label><select id="sf-hor" data-bind="S|horizon" data-type="str">${opt('month','Monatsende','month'===S.horizon?'month':S.horizon)}${opt('payday','nächster Gehaltstag',S.horizon)}</select></div>
+      <div class="row"><label class="name" for="sf-mstart">Monat beginnt am<small>${payMode() ? `Gehaltsmonat: ${esc(monthOnly(nowKey()))} = ${esc(periodRange(nowKey()))} (seit ${esc(monthName(S.periodSince))})` : 'Kalendermonat: 1. bis Monatsende'}</small></label><select id="sf-mstart" data-act2="mstart">${opt('calendar','1. (Kalendermonat)', payMode()?'payday':'calendar')}${opt('payday','Gehaltstag (Gehaltsmonat)', payMode()?'payday':'calendar')}</select></div>
+      ${msPending ? msConfirm() : ''}
+      ${payMode() ? '' : `<div class="row"><label class="name" for="sf-hor">„Heute ausgeben“ rechnen bis<small>Verteilung des freien Geldes auf die Tage</small></label><select id="sf-hor" data-bind="S|horizon" data-type="str">${opt('month','Monatsende','month'===S.horizon?'month':S.horizon)}${opt('payday','nächster Gehaltstag',S.horizon)}</select></div>`}
     </div></div></section>
   <section><div class="sechead"><h2>Konto & Sync</h2></div><div class="panel"><div class="rows">${acct}</div></div>
     <p class="hint">Konten (Girokonto, Bargeld …) verwaltest du unter „Konten“, Personen unter „Schulden“, wiederkehrende Zahlungen unter „Wiederkehrend“.</p></section>`;
@@ -1760,7 +1882,7 @@ modal.addEventListener('submit', e=>{
    ===================================================================== */
 document.getElementById('prev').onclick = ()=>{ cur = shiftMonth(cur,-1); armed=null; render(true); };
 document.getElementById('next').onclick = ()=>{ cur = shiftMonth(cur,1); armed=null; render(true); };
-document.getElementById('today').onclick = ()=>{ cur = monthKey(new Date()); render(true); };
+document.getElementById('today').onclick = ()=>{ cur = nowKey(); render(true); };
 function goTab(t){ tab=t; armed=null; try{localStorage.setItem('budget-tab',tab)}catch(_){} render(true); window.scrollTo({top:0}); const b=document.querySelector(`#tabs [data-tab="${t}"]`); if(b) b.scrollIntoView({inline:'nearest',block:'nearest'}); }
 document.getElementById('tabs').onclick = e=>{ const b=e.target.closest('button[data-tab]'); if(!b) return; if(b.dataset.tab==='schulden') selPerson=null; goTab(b.dataset.tab); };
 
@@ -1773,7 +1895,7 @@ function readBound(el){
   if(tp==='actual'){
     if(el.value.trim()==='') return null;
     const acc = el.dataset.bind.split('|').pop(), prevAt = months[cur]?.actual?.[acc]?.at;
-    const at = prevAt || (monthKey(new Date()) > cur ? monthLastDay(cur) : todayStr());
+    const at = prevAt || (nowKey() > cur ? monthLastDay(cur) : todayStr());
     return {amount: parseAmt(el.value, true), at};
   }
   if(tp==='int') return parseInt(el.value,10)||1;
@@ -1804,6 +1926,13 @@ function applyBound(el, save){
       toast(`Budgetverwaltung beginnt jetzt im ${monthName(val)}.`);
       return;
     }
+    if(segs[0]==='payday' && payMode()){
+      if(!save) return;
+      if(val < 2){ toast('Für einen Gehaltsmonat muss der Gehaltstag nach dem 1. liegen. Stelle sonst „Monat beginnt am“ auf den 1.'); render(true); return; }
+      const n = changeMonthRule(s=>{ s.payday = val; }, 'vor Änderung des Gehaltstags');
+      toast(`Gehaltstag ${val}. – Monate laufen jetzt vom ${val}. bis zum ${val-1}.${n?` ${n} Buchung${n===1?'':'en'} neu zugeordnet.`:''}`);
+      return;
+    }
     editSettings(s=>setPath(s, segs, val), save);
     if(save && segs[0]==='recurring' && segs[2]==='amount') propagatePlan('plan', segs[1], val);
     if(save && segs[0]==='incomes' && segs[2]==='amount') propagatePlan('incomePlan', segs[1], val);
@@ -1814,7 +1943,7 @@ function applyBound(el, save){
 }
 /* Betragsänderung einer Vorlage gilt für aktuellen + künftige, noch offene, nicht abgeschlossene Monate */
 function propagatePlan(field, id, val){
-  const now = monthKey(new Date());
+  const now = nowKey();
   Object.keys(months).forEach(k=>{
     if(k < now || isClosed(k)) return;
     const p = months[k][field]?.[id]; if(!p) return;
@@ -1842,6 +1971,7 @@ main.addEventListener('change', e=>{
     if(['scope','cat'].includes(el.dataset.flt)) render(true);      // ändern das Formular selbst
     else refreshTxList();                                            // nur die Ergebnisliste neu – Formular und Fokus bleiben
   }
+  else if(el.dataset.act2==='mstart'){ const want = el.value; msPending = (want==='payday') !== payMode() ? want : null; render(true); }
   else if(el.dataset.act2==='afford'){ if(el.id==='aff-cat'){ affordCat = el.value; render(true); } else affordAmt = el.value; }
   else if(el.dataset.act2==='personMonth'){ personMonth = el.value; render(true); }
   else if(el.dataset.act2==='debtMonth'){ debtMonth = el.value || null; render(true); }
@@ -1864,12 +1994,12 @@ main.addEventListener('submit', e=>{
   if(id==='addform'){
     const v = readExpenseForm('e'); if(!v) return;
     const t = addTx(v); if(!t) return;
-    if(v.rid) linkPlan(v.date.slice(0,7), v.rid, t.id);
+    if(v.rid) linkPlan(bucketOf(v.date), v.rid, t.id);
     lastCat = v.cat; lastAcc = v.account;
     const k = S.cats.find(c=>c.id===v.cat);
     let msg = `${fmt(v.amount)} für ${catName(v.cat)} eingetragen`;
     if(v.personId) msg += ` · Schuld bei ${personName(v.personId)} −${fmt(v.amount)}`;
-    const key = v.date.slice(0,7);
+    const key = bucketOf(v.date);
     if(k && k.limit){ const used = catSpent(key,v.cat); if(used>k.limit) msg += ' · Budget überschritten'; else if(used>=k.limit*.8) msg += ` · ${Math.round(used/k.limit*100)} % vom Budget`; }
     if(v.rid) msg += ` · ${(S.recurring.find(r=>r.id===v.rid)||{}).name} gilt als bezahlt`;
     if(key!==cur) msg += ` (in ${monthName(key)})`;
@@ -1880,7 +2010,7 @@ main.addEventListener('submit', e=>{
     const amount = parseAmt(document.getElementById('i-amt').value); if(!amount){ toast('Bitte gib einen Betrag ein.'); return; }
     const src = document.getElementById('i-src').value;
     const t = {type:'income', amount, date:document.getElementById('i-date').value||todayStr(), account:document.getElementById('i-acc').value, incId:'', note:document.getElementById('i-note').value.trim() || (src?(S.incomes.find(i=>i.id===src)||{}).name:'')};
-    if(src){ const key=t.date.slice(0,7); const it = incomeItems(key).find(x=>x.i.id===src); if(it && !it.received){ t.incId = src; const added = addTx(t); if(added) editMonth(key, m=>{ m.incomePlan[src] = {...(m.incomePlan[src]||{amount:it.amount}), tx:added.id}; }); render(true); toast('Einnahme gebucht und als erhalten markiert.'); return; } }
+    if(src){ const key=bucketOf(t.date); const it = incomeItems(key).find(x=>x.i.id===src); if(it && !it.received){ t.incId = src; const added = addTx(t); if(added) editMonth(key, m=>{ m.incomePlan[src] = {...(m.incomePlan[src]||{amount:it.amount}), tx:added.id}; }); render(true); toast('Einnahme gebucht und als erhalten markiert.'); return; } }
     if(addTx(t)){ render(true); toast(`${fmt(amount)} Einnahme gebucht.`); }
   }
   else if(id==='trform'){
@@ -1906,7 +2036,7 @@ main.addEventListener('submit', e=>{
     const ridSel = document.getElementById('d-rid'); if(type==='debt_repay' && ridSel && ridSel.value && !document.getElementById('d-ridwrap').hidden) t.rid = ridSel.value;
     if(!note && type==='debt_in') t.note = 'Geld erhalten';
     const added = addTx(t);
-    if(added && t.rid) linkPlan(date.slice(0,7), t.rid, added.id);
+    if(added && t.rid) linkPlan(bucketOf(date), t.rid, added.id);
     if(added){ const s = personSummary(selPerson); render(true); toast(s.status==='ausgeglichen' ? `Gebucht. Schuld bei ${personName(selPerson)} ist vollständig ausgeglichen ✓` : `Gebucht. Offen bei ${personName(selPerson)}: ${fmt(s.open)}`); }
   }
 });
@@ -1932,17 +2062,25 @@ main.addEventListener('click', e=>{
       }
       render(true);
     },
+    msYes(){
+      const want = msPending; msPending = null;
+      const n = want==='payday' ? startPayMonths() : stopPayMonths();
+      cur = nowKey();
+      toast(want==='payday' ? `Gehaltsmonat aktiv: ${monthOnly(cur)} = ${periodRange(cur)}.${n?` ${n} Buchung${n===1?'':'en'} neu zugeordnet.`:''}` : `Kalendermonat aktiv.${n?` ${n} Buchung${n===1?'':'en'} neu zugeordnet.`:''}`);
+      render(true);
+    },
+    msNo(){ msPending = null; render(true); },
     delsub(){ const cid=b.dataset.cat, ix=+b.dataset.ix; editSettings(s=>{ const k=s.cats.find(c=>c.id===cid); if(k) k.subs.splice(ix,1); }); render(true); },
     goto(){ goTab(b.dataset.tab); },
     person(){ selPerson = id; personMonth = ''; goTab('schulden'); },
     personBack(){ selPerson = null; render(true); },
     edit(){ openEditor(id); },
-    repeat(){ const f = findTx(id); if(!f) return; prefill = {...f.t, date: (cur===monthKey(new Date())?todayStr():cur+'-01'), _repeat:true}; delete prefill.id; goTab('ausgaben'); const a=document.getElementById('e-amt'); if(a){ a.focus(); a.select(); } toast('Betrag und Datum prüfen, dann „Hinzufügen“.'); },
+    repeat(){ const f = findTx(id); if(!f) return; prefill = {...f.t, date: (cur===nowKey()?todayStr():periodStart(cur)), _repeat:true}; delete prefill.id; goTab('ausgaben'); const a=document.getElementById('e-amt'); if(a){ a.focus(); a.select(); } toast('Betrag und Datum prüfen, dann „Hinzufügen“.'); },
     fltToggle(){ flt.open = !flt.open; render(true); if(flt.open) document.getElementById('f-q')?.focus(); },
     fltReset(){ flt = {open:true, q:'', scope:'month', month:'', from:'', to:'', cat:'', sub:'', min:'', max:'', person:'', account:'', type:'expense'}; render(true); },
     incGet(){
       const it = incomeItems(cur).find(x=>x.i.id===id); if(!it) return;
-      const date = cur===monthKey(new Date()) ? todayStr() : it.due;
+      const date = cur===nowKey() ? todayStr() : it.due;
       const t = addTx({type:'income', amount:it.amount, date, account:it.i.account, incId:id, note:it.i.name}); if(!t) return;
       editMonth(cur, m=>{ m.incomePlan[id] = {...(m.incomePlan[id]||{}), amount:it.amount, tx:t.id, skip:false}; });
       render(true); toast(`${it.i.name}: ${fmt(it.amount)} als erhalten gebucht.`);
@@ -1951,7 +2089,7 @@ main.addEventListener('click', e=>{
     incSkip(){ editMonth(cur, m=>{ m.incomePlan[id] = {...(m.incomePlan[id]||{}), skip: !m.incomePlan[id]?.skip}; }); render(true); },
     planPay(){
       const p = planItems(cur).find(x=>x.r.id===id); if(!p) return;
-      const date = cur===monthKey(new Date()) ? todayStr() : p.due;
+      const date = cur===nowKey() ? todayStr() : p.due;
       const base = {amount:p.amount, date, account:p.r.account, rid:id, note:p.r.name};
       const t = p.r.kind==='schulden' ? {...base, type:'debt_repay', personId:p.r.personId||''} : {...base, type:'expense', personId:''};
       if(p.r.kind==='schulden' && !p.r.personId) toast('Hinweis: Dieser Schuldenzahlung ist keine Person zugeordnet.');
@@ -1968,7 +2106,7 @@ main.addEventListener('click', e=>{
     },
     addAccount(){ const nid=newId('a'); editSettings(s=>s.accounts.push({id:nid,name:'Neues Konto',type:'other'})); render(true); const i=document.getElementById(`acc-${nid}-name`); if(i){ i.focus(); i.select(); } },
     addGoal(){ const nid=newId('g'); editSettings(s=>s.goals.push({id:nid,name:'Neues Sparziel',target:0,start:0,monthly:0,emergency:false})); render(true); const d=document.getElementById(`g-${nid}-name`); if(d){ d.closest('details').open=true; d.focus(); d.select(); } },
-    addRecurring(){ const nid=newId('r'); const nowK=monthKey(new Date()); editSettings(s=>s.recurring.push({id:nid,name:'Neue Zahlung',amount:0,kind:'fix',interval:1,dueDay:1,start: nowK > S.budgetStart ? nowK : '',end:'',active:true,account:S.accounts[0].id,personId:''})); render(true); const d=document.getElementById(`r-${nid}-name`); if(d){ d.closest('details').open=true; d.focus(); d.select(); } },
+    addRecurring(){ const nid=newId('r'); const nowK=nowKey(); editSettings(s=>s.recurring.push({id:nid,name:'Neue Zahlung',amount:0,kind:'fix',interval:1,dueDay:1,start: nowK > S.budgetStart ? nowK : '',end:'',active:true,account:S.accounts[0].id,personId:''})); render(true); const d=document.getElementById(`r-${nid}-name`); if(d){ d.closest('details').open=true; d.focus(); d.select(); } },
     addCat(){ const nid=newId('c'); editSettings(s=>s.cats.push({id:nid,name:'Neue Kategorie',subs:[],limit:0,weekly:0,subLimits:{},subWeekly:{}})); render(true); const d=document.getElementById(`c-${nid}-name`); if(d){ d.focus(); d.select(); } },
     addIncome(){ const nid=newId('i'); editSettings(s=>s.incomes.push({id:nid,name:'Neue Einnahme',amount:0,day:S.payday,account:S.accounts[0].id,active:true})); render(true); const d=document.getElementById(`in-${nid}-name`); if(d){ d.closest('details').open=true; d.focus(); d.select(); } },
     settleAll(){ const s = personSummary(selPerson); document.getElementById('d-type').value='debt_repay'; syncDebtForm(); document.getElementById('d-amt').value = amtIn(s.open); document.getElementById('d-note').value='Vollständiger Ausgleich'; document.getElementById('d-amt').focus(); toast('Konto und Datum prüfen, dann „Buchen“.'); },
@@ -2354,7 +2492,7 @@ function yearReport(y){
    ===================================================================== */
 try{ const t=localStorage.getItem('budget-tab'); if(t && VIEWS[t]) tab=t; }catch(_){}
 const configured = !Object.values(firebaseConfig).some(v=>String(v).startsWith('HIER'));
-function showApp(){ document.getElementById('login').hidden = true; document.getElementById('app').hidden = false; render(true); }
+function showApp(){ document.getElementById('login').hidden = true; document.getElementById('app').hidden = false; if(!showApp.done){ cur = nowKey(); showApp.done = true; } render(true); }
 function migrationNotice(){ toast('Deine Daten wurden automatisch ins neue Format übernommen. Eine Sicherung der alten Daten liegt unter Berichte › Automatische Sicherungen.'); }
 
 if(!configured){
@@ -2451,7 +2589,7 @@ async function startCloud(){
     }, ()=>{}));
   });
 }
-window.__budget = { get S(){return S;}, get months(){return months;}, calcM, balances, personSummary, spendToday, excelSheets, buildXlsx, personPdfBlob, settledIn };
+window.__budget = { get S(){return S;}, get months(){return months;}, get cur(){return cur;}, set cur(v){ cur=v; }, nowKey, bucketOf, periodStart, periodEnd, periodRange, itemDate, planItems, incomeItems, weeksOf, weekSpent, monthlyBudgets, startPayMonths, stopPayMonths, changeMonthRule, addTx, updateTx, findTx, render: ()=>render(true), calcM, balances, personSummary, spendToday, excelSheets, buildXlsx, personPdfBlob, settledIn };
 </script>
 </body>
 </html>
